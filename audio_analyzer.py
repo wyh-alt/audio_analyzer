@@ -7,7 +7,7 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QFileDialog, QTableWidge
                             QTableWidgetItem, QPushButton, QVBoxLayout, QHBoxLayout, 
                             QWidget, QLabel, QHeaderView, QMessageBox, QProgressBar,
                             QStatusBar, QGroupBox, QSizePolicy, QSpinBox)
-from PyQt5.QtCore import Qt, QThread, pyqtSignal, QMimeData, QUrl, QThreadPool, QRunnable, QObject
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, QMimeData, QUrl, QThreadPool, QRunnable, QObject, QMutex
 from PyQt5.QtGui import QDragEnterEvent, QDropEvent, QFont, QIcon
 import librosa
 import soundfile as sf
@@ -22,7 +22,7 @@ class WorkerSignals(QObject):
     定义工作线程的信号
     """
     result = pyqtSignal(dict)
-    progress = pyqtSignal(int)
+    progress = pyqtSignal(int, int)  # 修改为发送文件索引和总文件数
     finished = pyqtSignal()
     error = pyqtSignal(str)
 
@@ -57,10 +57,9 @@ class AudioAnalysisWorker(QRunnable):
                 }
                 self.signals.result.emit(error_result)
         
-        # 更新进度
+        # 更新进度 - 发送文件索引和总文件数，而不是百分比
         if not self.is_cancelled:
-            progress = int((self.file_index + 1) / self.total_files * 100)
-            self.signals.progress.emit(progress)
+            self.signals.progress.emit(self.file_index + 1, self.total_files)
     
     def cancel(self):
         """取消分析任务"""
@@ -128,6 +127,8 @@ class AudioAnalyzerApp(QMainWindow):
                 self.setWindowIcon(QIcon("app_icon.png"))
             elif os.path.exists("app_icon.ico"):
                 self.setWindowIcon(QIcon("app_icon.ico"))
+            elif os.path.exists("app_icon_256x256.png"):
+                self.setWindowIcon(QIcon("app_icon_256x256.png"))
         except Exception:
             # 如果加载图标失败，忽略错误继续运行
             pass
@@ -141,6 +142,8 @@ class AudioAnalyzerApp(QMainWindow):
         self.total_tasks = 0
         self.active_workers = []
         self.is_analyzing = False
+        self.progress_mutex = QMutex()  # 添加互斥锁保护进度更新
+        self.current_progress = 0  # 当前进度值
         
         self.init_ui()
     
@@ -352,6 +355,7 @@ class AudioAnalyzerApp(QMainWindow):
         self.completed_tasks = 0
         self.total_tasks = len(file_paths)
         self.active_workers = []
+        self.current_progress = 0  # 重置当前进度
         
         # 预先创建表格行
         self.table.setRowCount(self.total_tasks)
@@ -431,10 +435,23 @@ class AudioAnalyzerApp(QMainWindow):
         if self.completed_tasks >= self.total_tasks and self.is_analyzing:
             self.analysis_finished()
     
-    def update_progress(self, value):
-        """更新进度条"""
-        self.progress_bar.setValue(value)
-        self.status_bar.showMessage(f"已完成 {self.completed_tasks}/{self.total_tasks} 个文件分析 ({value}%)")
+    def update_progress(self, completed_files, total_files):
+        """更新进度条 - 使用互斥锁确保进度只增不减"""
+        # 使用互斥锁保护进度更新
+        self.progress_mutex.lock()
+        try:
+            # 计算当前百分比
+            progress_percent = int(completed_files * 100 / total_files)
+            
+            # 确保进度只增不减
+            if progress_percent > self.current_progress:
+                self.current_progress = progress_percent
+                self.progress_bar.setValue(self.current_progress)
+                
+                # 更新状态栏
+                self.status_bar.showMessage(f"已完成 {self.completed_tasks}/{self.total_tasks} 个文件分析 ({self.current_progress}%)")
+        finally:
+            self.progress_mutex.unlock()
     
     def update_status(self, message):
         """更新状态栏消息"""
